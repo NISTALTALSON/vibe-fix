@@ -210,7 +210,7 @@ Issues   : 14 total
 🟢 LOW (2 issues) ...
 
 ═══════════════════════════════════════════════════
-Which tier would you like me to fix first?
+Which tier would you like me to fix first?.
 ```
 
 ---
