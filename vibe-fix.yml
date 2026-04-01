@@ -1,0 +1,148 @@
+name: vibe-fix Security Audit
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  vibe-fix:
+    name: 🔧 vibe-fix Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install vibe-fix
+        run: |
+          git clone https://github.com/NISTALTALSON/vibe-fix .vibe-fix
+          echo "✅ vibe-fix installed"
+
+      - name: Run Python audit
+        id: py-audit
+        run: |
+          python .vibe-fix/scripts/audit.py . --json > vibe-fix-py-report.json || true
+          python .vibe-fix/scripts/audit.py . --score
+        continue-on-error: true
+
+      - name: Run JS/TS audit
+        id: js-audit
+        run: |
+          node .vibe-fix/scripts/audit.js . --json > vibe-fix-js-report.json || true
+          node .vibe-fix/scripts/audit.js . --score
+        continue-on-error: true
+
+      - name: Upload audit reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vibe-fix-reports
+          path: |
+            vibe-fix-py-report.json
+            vibe-fix-js-report.json
+
+      - name: Check for critical issues
+        run: |
+          PY_CRITICAL=$(python -c "
+          import json, sys
+          try:
+            data = json.load(open('vibe-fix-py-report.json'))
+            critical = [i for i in data.get('issues', []) if i['severity'] == 'CRITICAL']
+            if critical:
+              print(f'❌ {len(critical)} CRITICAL Python issue(s) found!')
+              for i in critical:
+                print(f'  [{i[\"file\"]}:{i[\"line\"]}] {i[\"message\"]}')
+              sys.exit(1)
+            else:
+              print('✅ No critical Python issues')
+          except Exception as e:
+            print(f'Warning: {e}')
+          " 2>&1 || true)
+
+          JS_CRITICAL=$(node -e "
+          const fs = require('fs');
+          try {
+            const data = JSON.parse(fs.readFileSync('vibe-fix-js-report.json', 'utf8'));
+            const critical = data.issues.filter(i => i.severity === 'CRITICAL');
+            if (critical.length) {
+              console.log(\`❌ \${critical.length} CRITICAL JS/TS issue(s) found!\`);
+              critical.forEach(i => console.log(\`  [\${i.file}:\${i.line}] \${i.message}\`));
+              process.exit(1);
+            } else {
+              console.log('✅ No critical JS/TS issues');
+            }
+          } catch(e) { console.log('Warning:', e.message); }
+          " 2>&1 || true)
+
+          echo "$PY_CRITICAL"
+          echo "$JS_CRITICAL"
+
+          # Fail CI if critical issues found in either
+          if echo "$PY_CRITICAL" | grep -q "CRITICAL" || echo "$JS_CRITICAL" | grep -q "CRITICAL"; then
+            echo "🔴 Build failed: Critical security issues detected by vibe-fix"
+            echo "Run: npx skills add NISTALTALSON/vibe-fix and then: 'fix my critical issues'"
+            exit 1
+          fi
+
+      - name: Post PR comment with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '## 🔧 vibe-fix Audit Results\n\n';
+
+            try {
+              const pyData = JSON.parse(fs.readFileSync('vibe-fix-py-report.json', 'utf8'));
+              const jsData = JSON.parse(fs.readFileSync('vibe-fix-js-report.json', 'utf8'));
+
+              const pyScore = Math.max(0, 100 - pyData.issues.reduce((s, i) =>
+                s + ({ CRITICAL: 25, HIGH: 10, MEDIUM: 4, LOW: 1 }[i.severity] || 0), 0));
+              const jsScore = Math.max(0, 100 - jsData.issues.reduce((s, i) =>
+                s + ({ CRITICAL: 25, HIGH: 10, MEDIUM: 4, LOW: 1 }[i.severity] || 0), 0));
+
+              const overallScore = Math.round((pyScore + jsScore) / 2);
+              const emoji = overallScore >= 90 ? '🟢' : overallScore >= 75 ? '🟡' : overallScore >= 50 ? '🟠' : '🔴';
+
+              body += `${emoji} **Overall Health Score: ${overallScore}/100**\n\n`;
+              body += `| Scanner | Score | Issues |\n|---------|-------|--------|\n`;
+              body += `| Python | ${pyScore}/100 | ${pyData.issues.length} |\n`;
+              body += `| JS/TS | ${jsScore}/100 | ${jsData.issues.length} |\n\n`;
+
+              const allIssues = [...pyData.issues, ...jsData.issues];
+              const critical = allIssues.filter(i => i.severity === 'CRITICAL');
+
+              if (critical.length) {
+                body += `### 🔴 Critical Issues (must fix)\n\n`;
+                critical.forEach(i => {
+                  body += `- \`${i.file}:${i.line}\` — ${i.message}\n`;
+                  body += `  - Fix: ${i.fix}\n`;
+                });
+              } else {
+                body += `✅ No critical issues found!\n`;
+              }
+
+              body += `\n---\n*Powered by [vibe-fix](https://github.com/NISTALTALSON/vibe-fix) — surgical repair for AI-generated code*`;
+
+            } catch(e) {
+              body += `⚠️ Could not parse audit results: ${e.message}`;
+            }
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
