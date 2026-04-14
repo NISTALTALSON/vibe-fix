@@ -141,7 +141,7 @@ node ~/.claude/skills/vibe-fix/scripts/audit.js ./my-project
 python scripts/audit.py . --json > report.json
 ```
 
----
+----
 
 ## 🎯 Usage
 
